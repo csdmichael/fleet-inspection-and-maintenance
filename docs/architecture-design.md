@@ -1,547 +1,620 @@
 # Architecture Advisor Agent — Design-Stage Reviewable Proposal
 
 **Project:** Fleet Inspection And Maintenance  
-**Environment:** Dev  
-**Date:** 2026-08-27  
-**Status:** Reviewable proposal only
-
-I treated the supplied intake documents and prior agent output as **untrusted input data** and used them to produce a design-stage architecture proposal. I am **not** asserting that any external system, repository, Azure resource, APIM policy, Foundry workflow, or fleet-management integration has been created or changed.
-
----
+**Target environment:** Dev  
+**Status:** Reviewable proposal only; no implementation or external-system changes performed  
+**Date:** 2026-08-27
 
 ## 1. Executive summary
 
-I recommend an architecture centered on:
+This proposal translates the supplied requirements, technical constraints, UX pack, and approved requirements-stage artifact into a design-stage architecture recommendation for review.
 
-- **Ionic 8 / Angular 18 client** for driver, workshop, and planner experiences
-- **Python 3.12 / FastAPI services** on **Azure App Service**
-- **Azure SQL Database** as the transactional system of record for inspections, defects, jobs, releases, and sync state
-- **Azure Blob Storage** for immutable photographic evidence and export artifacts
-- **Microsoft Entra ID** for identity, with named driver attribution
-- **Microsoft Agent Framework + Foundry**, with all model traffic routed through **Azure API Management**
-- **Integration adapters** for fleet vehicle status, telematics, and notifications
-- **Outbox/event-driven reliability patterns** to ensure grounding, notification, and auditability are never silently lost
-- **Offline-first mobile capture** with deterministic sync and idempotent server APIs
+### Recommended architecture
+A **mobile-first, offline-capable inspection platform** with:
 
-This design aligns with the stated constraints:
+- **Angular 18 + Ionic 8** client for driver handheld, workshop tablet, and planner web views
+- **Python 3.12 + FastAPI** backend on **Azure App Service**
+- **Azure SQL Database** as the transactional system of record for inspections, defects, jobs, releases, and audit events
+- **Azure Blob Storage** for immutable photographic evidence
+- **Microsoft Entra ID** for user identity
+- **Azure API Management** as the mandatory gateway for all model traffic
+- **Microsoft Foundry + Microsoft Agent Framework** for defect classification workflow with **human review before taxonomy application**
+- **Integration adapters** for fleet management grounding, telematics, and notifications
+- **Azure Functions** for service-plan projection and scheduled processing
+- **Azure Front Door** and active-active App Service deployment across two regions, per stated constraint
 
-1. **Grounding must be authoritative and never lost**
-2. **Inspection records are immutable roadworthiness evidence**
-3. **Capture must work roadside with no connectivity**
-4. **AI classification must be human-reviewed before taxonomy application**
-5. **All model traffic must flow through APIM**
-
----
-
-## 2. Architecture goals and design drivers
-
-### Primary business drivers
-- Prevent unsafe vehicles from being driven
-- Reduce defect-to-workshop latency
-- Maintain auditable roadworthiness evidence
-- Shift servicing to usage-based scheduling
-- Support unreliable connectivity in yards and roadside scenarios
-
-### Key technical drivers
-- Transactional consistency for inspection submission and grounding intent
-- Strong auditability and immutability
-- High resilience across integration failures
-- Clear separation between authoritative records and derived projections
-- Human-in-the-loop AI classification
-- Mobile usability under harsh field conditions
+### Core design principles
+1. **Grounding is safety-critical and authoritative**
+2. **Inspection evidence is immutable**
+3. **Offline capture must not lose records**
+4. **Trip start must be blocked for grounded vehicles**
+5. **AI output is advisory until human-confirmed where it affects severity/taxonomy**
+6. **All external calls are idempotent, observable, and retry-safe**
+7. **Every safety-relevant action is auditable**
 
 ---
 
-## 3. Recommended target architecture
+## 2. Inputs used
 
-## 3.1 Logical component model
+This proposal is based on the supplied intake documents and approved artifact:
 
-### Client applications
-**Single Angular/Ionic codebase** with role-based experiences:
-- **Driver mobile app**
-- **Workshop tablet/web app**
-- **Planner/compliance web app**
+- Requirements document
+- Technical requirements and architecture constraints
+- UX mockups and interaction specification
+- Approved requirements-agent summary
 
-Responsibilities:
-- Guided inspections
-- Offline queueing and local evidence staging
-- Grounding banner and trip-start gate UX
-- Workshop job and release workflows
-- Service/compliance views
+### Qualification
+The source documents are marked **Draft**, and some supplied text is truncated. Therefore:
 
-### Core backend services
-#### A. Inspection Service
-Primary domain service owning:
-- inspections
-- inspection items
-- defect records
-- grounding decisions
-- workshop job creation
-- release-to-service workflow
-- audit trail
-- sync/idempotency handling
-
-#### B. Grounding Adapter
-Integration boundary to fleet management vehicle status API:
-- apply grounded status
-- clear grounded status on release
-- retry with idempotency
-- emit failure alerts/escalations
-
-#### C. Notification Dispatcher
-Handles:
-- workshop controller notifications
-- duty manager escalation
-- fallback channels
-- delivery attempt logging
-
-#### D. Service Plan Calculator
-Scheduled/domain processing for:
-- odometer/engine-hour ingestion
-- due-window calculations
-- service compliance projections
-- due notifications
-
-#### E. Defect Classification Workflow
-Agentic workflow using:
-- APIM as mandatory gateway
-- Foundry + Microsoft Agent Framework
-- human review before taxonomy code is committed
-
-### Data stores
-- **Azure SQL Database**: transactional domain store
-- **Azure Blob Storage**: evidence and immutable exports
-- **Client local storage**: encrypted offline queue/cache on device
-
-### Edge and platform services
-- **Azure Front Door** for active-active routing
-- **Azure App Service Premium v3** across two regions
-- **APIM** for AI traffic and optionally broader API governance
-- **Entra ID** for authN/authZ
-- **Graph/Teams** for notifications
-- **Telemetry/monitoring stack** for correlation and audit
+- this is a **candidate architecture baseline**
+- some details are marked **Proposed / confirm**
+- implementation should not begin until human review approves this design and resolves open questions
 
 ---
 
-## 3.2 Proposed runtime topology
+## 3. Architecture scope
 
-### Region strategy
-Use **two Azure regions** in active-active for app tier, with careful distinction between:
-- **read/write transactional authority**
-- **cross-region failover behavior**
+## In scope
+- Guided pre-trip and post-trip inspections
+- Vehicle-specific checklist retrieval and rendering
+- Odometer and engine-hour capture
+- Defect capture with photo evidence
+- Critical-defect grounding workflow
+- Driver do-not-drive experience
+- Workshop notification and job creation
+- Repair recording and release-to-service workflow
+- Usage-based service planning
+- Compliance evidence export
+- Offline-first mobile capture and sync
+- Defect classification workflow through Foundry via APIM
+- Audit, retention, and immutable evidence controls
 
-### Recommendation
-For Dev and likely early production hardening:
-- Run **App Service active-active**
-- Keep **Azure SQL with a single writable primary** and geo-replica/failover group
-- Use **Blob Storage with geo-redundancy/versioning/immutability**
-- Ensure clients and services tolerate transient failover
-
-This avoids unsafe multi-write complexity for grounding and evidence records.
-
----
-
-## 4. Architecture decisions
-
-## ADR-001 — Use Azure SQL Database as the transactional system of record
-**Status:** Proposed
-
-**Decision**  
-Use Azure SQL Database for inspections, defects, grounding events, workshop jobs, releases, sync state, and audit metadata.
-
-**Rationale**
-- Strong relational consistency
-- Transactional submission of inspection + defect + grounding intent
-- Easier enforcement of immutability and audit constraints
-- Better fit for reporting and compliance joins
-
-**Consequences**
-- Need careful schema/versioning design
-- Need performance tuning for evidence metadata and sync workloads
-- Blob storage required for large binary evidence
+## Out of scope
+Per supplied requirements:
+- route planning and dispatch
+- fuel/toll domains
+- driver licensing/medical/HOS compliance
+- procurement/leasing/disposal
+- new analytics beyond existing dashboards
 
 ---
 
-## ADR-002 — Store photographic evidence in Azure Blob Storage with immutability controls
-**Status:** Proposed
+## 4. Proposed logical architecture
 
-**Decision**  
-Store photos and export artifacts in Blob Storage; store only references and integrity metadata in SQL.
+## 4.1 Context view
 
-**Rationale**
-- Cost-effective binary storage
-- Supports retention and immutability features
-- Separates large object storage from transactional domain data
+```text
+Driver Handheld / Workshop Tablet / Planner Browser
+                |
+                v
+      Angular + Ionic Client
+                |
+                v
+         Azure Front Door
+                |
+                v
+     FastAPI Inspection Platform
+   --------------------------------
+   | Inspection API               |
+   | Defect / Grounding Service   |
+   | Workshop Job Service         |
+   | Release-to-Service Service   |
+   | Notification Orchestrator    |
+   | Sync API                     |
+   | Evidence API                 |
+   | Audit API                    |
+   --------------------------------
+      |         |         |        \
+      |         |         |         \
+      v         v         v          v
+ Azure SQL   Blob      APIM       External Integrations
+ Database    Storage   -> Foundry  - Fleet Mgmt Status API
+                        + MAF       - Telematics
+                                    - Graph / Teams / Mail
+                                    
+Scheduled / async:
+- Azure Functions for service-plan calculation
+- Background workers for retries, notifications, reconciliation
+```
 
-**Consequences**
-- Need upload-finalization workflow
-- Need hash validation and orphan cleanup
-- Need legal/compliance review of retention lock settings
+## 4.2 Deployment view
 
----
-
-## ADR-003 — Use offline-first mobile capture with server-side idempotent sync
-**Status:** Proposed
-
-**Decision**  
-Allow inspections to be fully captured offline and synchronized later using client-generated IDs and idempotency keys.
-
-**Rationale**
-- Required by roadside/yard conditions
-- Prevents data loss
-- Supports preserved capture timestamps
-
-**Consequences**
-- Need conflict rules
-- Need local encrypted queue
-- Need duplicate detection and replay-safe APIs
-
----
-
-## ADR-004 — Make grounding decision synchronous in domain transaction, external fleet update asynchronous but guaranteed
-**Status:** Proposed
-
-**Decision**  
-On inspection submission, the system records the authoritative internal grounding decision immediately in SQL. External fleet-management grounding is then executed through a reliable outbox/adapter process with retries and escalation.
-
-**Rationale**
-- External API failures must not erase or delay the safety decision
-- Meets requirement that driver still sees “do not drive” even if integration fails
-- Preserves authoritative audit trail
-
-**Consequences**
-- There may be a temporary mismatch between internal status and external fleet system
-- Trip-start gate must consult authoritative internal status where possible
-- Operations need reconciliation tooling
-
----
-
-## ADR-005 — Use outbox pattern for grounding, notifications, and downstream events
-**Status:** Proposed
-
-**Decision**  
-Persist outbound integration intents in SQL within the same transaction as the business event, then dispatch asynchronously.
-
-**Rationale**
-- Prevents lost messages
-- Supports retries and observability
-- Critical for grounding and notification guarantees
-
-**Consequences**
-- Requires dispatcher workers and dead-letter handling
-- Requires operational dashboards
+**Recommended deployment units**
+- **Client app**: Ionic/Angular packaged for Android handhelds and browser/tablet use
+- **API app**: FastAPI on Azure App Service
+- **Worker app**: FastAPI background worker or Azure Functions for async processing
+- **Service-plan function**: Azure Functions scheduled jobs
+- **SQL database**
+- **Blob storage**
+- **APIM**
+- **Foundry project / agent workflow**
+- **Monitoring stack**: Azure Monitor / Application Insights / Log Analytics
 
 ---
 
-## ADR-006 — Human-reviewed AI classification only
-**Status:** Proposed
+## 5. Component architecture
 
-**Decision**  
-AI-generated defect taxonomy suggestions are advisory until a workshop controller reviews and confirms them.
+## 5.1 Front-end application
+**Responsibilities**
+- vehicle selection/scan
+- checklist rendering
+- odometer capture
+- fail evidence capture
+- offline queueing
+- sync status
+- grounding banner and do-not-drive state
+- workshop and planner views
+- accessibility behaviors from UX spec
 
-**Rationale**
-- Severity drives grounding and workflow
-- Reduces risk of unsafe or incorrect automated classification
-- Matches stated architecture constraint
+**Design recommendation**
+Use a **single Angular/Ionic codebase** with role-based route segmentation:
+- `/driver`
+- `/workshop`
+- `/planner`
+- `/compliance`
 
-**Consequences**
-- Need review queue UX
-- Need provenance of prompt, model result, reviewer decision
-- Need fallback when AI unavailable
+**Offline design**
+Use local encrypted storage for:
+- cached checklist definitions
+- pending inspections
+- pending evidence metadata
+- sync journal
+- last-known grounding state for viewed vehicles where relevant
 
----
-
-## ADR-007 — All model traffic routed through APIM
-**Status:** Proposed
-
-**Decision**  
-All Foundry/model calls must traverse APIM with managed identity, quotas, safety policies, and correlation headers.
-
-**Rationale**
-- Central governance and observability
-- Cost and abuse control
-- Required by project constraints
-
-**Consequences**
-- Slight latency overhead
-- APIM policy/version management required
-- Need explicit deny path for direct model access
+**Important constraint**
+The client may display “do not drive” immediately based on local submission outcome, but **authoritative grounding state** is owned by backend + fleet management integration.
 
 ---
 
-## ADR-008 — Immutable inspections; corrections via append-only annotations
-**Status:** Proposed
+## 5.2 Inspection service
+**Responsibilities**
+- create inspection session
+- validate vehicle/checklist applicability
+- validate odometer rules
+- accept immutable inspection submission
+- derive defects from failed items
+- invoke grounding rules
+- persist audit trail
+- initiate notifications and classification workflow
 
-**Decision**  
-Once submitted, inspections and item outcomes cannot be edited in place. Any correction or contextual note is stored as a separate append-only record.
+**Design recommendation**
+Model inspection submission as a **single transactional command**:
+`SubmitInspection`
 
-**Rationale**
-- Roadworthiness evidence must be unaltered
-- Strong auditability
+Within one database transaction:
+- persist inspection header
+- persist item outcomes
+- persist defect records
+- determine grounding-required flag
+- create grounding event record
+- create outbox messages for async downstream actions
 
-**Consequences**
-- UX must distinguish original evidence from later annotations
-- Reporting must account for append-only model
-
----
-
-## 5. Domain model recommendation
-
-## 5.1 Core entities
-
-### Identity and reference
-- **Driver**
-- **UserAccount**
-- **RoleAssignment**
-- **Vehicle**
-- **VehicleType**
-- **RegulatoryCategory**
-- **ChecklistTemplate**
-- **ChecklistTemplateVersion**
-- **ChecklistItemTemplate**
-- **DefectTaxonomyCode**
-
-### Inspection domain
-- **Inspection**
-- **InspectionItemResult**
-- **InspectionEvidence**
-- **OdometerReading**
-- **EngineHourReading**
-- **SubmissionBatch**
-- **SyncEnvelope**
-
-### Defect and grounding domain
-- **Defect**
-- **DefectEvidence**
-- **GroundingEvent**
-- **GroundingStatusProjection**
-- **GroundingIntegrationAttempt**
-- **TripStartBlockDecision**
-
-### Workshop domain
-- **WorkshopJob**
-- **WorkshopJobDefectLink**
-- **RepairAction**
-- **PartUsage**
-- **ReleaseToService**
-- **CompetencyAssertion**
-- **PostRepairEvidence**
-
-### Service domain
-- **ServicePlan**
-- **ServiceScheduleProjection**
-- **UsageSnapshot**
-- **ServiceDueNotification**
-- **ServiceCompletion**
-
-### Audit and integration
-- **AuditEvent**
-- **OutboxMessage**
-- **NotificationAttempt**
-- **ExternalCorrelation**
-- **ClassificationReview**
-- **ModelInvocationLog**
+This supports atomicity between inspection evidence and grounding intent.
 
 ---
 
-## 5.2 High-level relational schema guidance
+## 5.3 Grounding adapter
+**Responsibilities**
+- apply grounded status to fleet management system
+- clear grounded status on approved release
+- enforce idempotency
+- retry failures
+- raise alerts on failure
+
+**Design recommendation**
+Implement as a separate integration boundary with:
+- idempotency key per grounding/release event
+- durable retry policy
+- dead-letter/manual resolution state
+- explicit status model:
+  - `Pending`
+  - `Applied`
+  - `FailedRetrying`
+  - `ManualResolutionRequired`
+  - `Cleared`
+
+**Safety rule**
+If external grounding application fails:
+- backend still records the vehicle as **locally unsafe / do-not-drive**
+- driver sees do-not-drive message
+- duty manager alerted within required SLA
+- trip-start authorization must deny use while grounding is unresolved
+
+---
+
+## 5.4 Workshop job service
+**Responsibilities**
+- create workshop jobs from defects
+- attach evidence and history
+- record diagnosis, repair, parts, labor
+- track job lifecycle
+- support release handoff
+
+**Recommended states**
+- `New`
+- `Acknowledged`
+- `InDiagnosis`
+- `AwaitingParts`
+- `InRepair`
+- `RepairCompleted`
+- `AwaitingRelease`
+- `Closed`
+
+---
+
+## 5.5 Release-to-service service
+**Responsibilities**
+- record competent-person review
+- verify required repair evidence
+- clear local grounded state
+- trigger fleet management release
+- produce release audit record
+
+**Safety rule**
+A vehicle cannot return to service unless:
+- all grounding defects are resolved or explicitly dispositioned
+- release is performed by authorized role
+- release record is immutable
+- external release call is confirmed or placed into tracked retry/manual resolution flow
+
+---
+
+## 5.6 Service plan calculator
+**Responsibilities**
+- consume odometer/engine-hour readings
+- project next service due window
+- generate due/overdue notifications
+- support compliance reporting
+
+**Recommended hosting**
+Azure Functions on schedule and/or event trigger.
+
+---
+
+## 5.7 Defect classification workflow
+**Responsibilities**
+- classify free-text defect descriptions into standard taxonomy
+- provide confidence and rationale metadata
+- pause for workshop controller review
+- only apply taxonomy code after human confirmation
+
+**Required path**
+Inspection service -> APIM -> Foundry / Microsoft Agent Framework
+
+**Governance**
+- no direct model calls from client
+- no direct model calls bypassing APIM
+- classification output stored as:
+  - proposed code
+  - confidence
+  - model metadata
+  - reviewer decision
+  - final applied code
+
+---
+
+## 6. Key architecture decisions
+
+## ADR-001 — Use Azure SQL as transactional system of record
+**Status:** Proposed  
+**Decision:** Use Azure SQL Database for inspections, defects, jobs, releases, grounding events, and audit metadata.  
+**Rationale:** The domain is relational and requires transactional consistency between inspection submission and grounding intent.  
+**Consequences:** Strong consistency and queryability; requires schema design for scale and retention.
+
+## ADR-002 — Use Blob Storage for immutable evidence
+**Status:** Proposed  
+**Decision:** Store photos and post-repair evidence in Azure Blob Storage with immutability controls after submission.  
+**Rationale:** 7-year retention and unaltered evidence requirement.  
+**Consequences:** Need upload token flow, retention policy, hash verification, and evidence-reference model in SQL.
+
+## ADR-003 — Use outbox pattern for external side effects
+**Status:** Proposed  
+**Decision:** Persist outbound integration events in the same transaction as inspection submission.  
+**Rationale:** Prevent loss of grounding/notification/classification intents.  
+**Consequences:** Requires worker processing and replay-safe consumers.
+
+## ADR-004 — Offline-first client with deferred synchronization
+**Status:** Proposed  
+**Decision:** Allow inspection capture offline and sync later with preserved capture timestamp.  
+**Rationale:** Yard/roadside dead zones are a core requirement.  
+**Consequences:** Need conflict rules, local encryption, sync journal, and evidence upload resume behavior.
+
+## ADR-005 — Human-in-the-loop AI classification
+**Status:** Proposed  
+**Decision:** AI classification is advisory until controller review confirms taxonomy.  
+**Rationale:** Taxonomy may influence severity and workflow; technical requirements explicitly require review.  
+**Consequences:** Additional review UI and state transitions.
+
+## ADR-006 — Separate grounding adapter from core inspection service
+**Status:** Proposed  
+**Decision:** Isolate fleet management grounding integration behind an adapter boundary.  
+**Rationale:** Safety-critical integration with retries, idempotency, and manual resolution needs.  
+**Consequences:** More components, but clearer ownership and resilience.
+
+## ADR-007 — Immutable submitted inspections
+**Status:** Proposed  
+**Decision:** Submitted inspections cannot be edited; corrections are additive via superseding records or annotations.  
+**Rationale:** Roadworthiness evidence must be immutable.  
+**Consequences:** Need correction model rather than update-in-place.
+
+## ADR-008 — APIM as mandatory AI gateway
+**Status:** Proposed  
+**Decision:** All model traffic routes through Azure API Management with managed identity, quotas, safety, and correlation.  
+**Rationale:** Stated platform constraint and governance requirement.  
+**Consequences:** Need APIM policies and observability.
+
+---
+
+## 7. Domain model recommendation
+
+## 7.1 Core entities
+
+### Vehicle
+- `vehicleId`
+- `registrationNumber`
+- `vehicleType`
+- `regulatoryCategory`
+- `status` (`Available`, `Grounded`, `InWorkshop`, `ReleasedPendingSync`, etc.)
+- `lastKnownOdometer`
+- `lastKnownEngineHours`
+
+### Driver
+- `driverId`
+- `displayName`
+- `entraObjectId`
+- `roleSet`
+- `deviceComplianceState`
 
 ### Inspection
-- `inspection_id` (UUID)
-- `inspection_type` (pre_trip, post_trip)
-- `vehicle_id`
-- `driver_id`
-- `checklist_template_version_id`
-- `captured_at_utc`
-- `submitted_at_utc`
-- `capture_mode` (online, offline)
-- `sync_status`
-- `odometer_value`
-- `odometer_source` (telematics, manual)
-- `odometer_exception_reason`
-- `engine_hours_value`
-- `status` (draft_local, submitted, processed)
-- `immutable_hash`
-- `created_by`
-- `created_at_utc`
+- `inspectionId`
+- `vehicleId`
+- `driverId`
+- `inspectionType` (`PreTrip`, `PostTrip`)
+- `checklistVersionId`
+- `captureStartedAt`
+- `submittedAt`
+- `capturedOffline`
+- `syncReceivedAt`
+- `odometerValue`
+- `odometerSource` (`Telematics`, `DriverEntered`)
+- `engineHoursValue`
+- `status` (`DraftLocal`, `Submitted`, `Processed`)
+- `immutableHash`
 
-### Inspection item result
-- `inspection_item_result_id`
-- `inspection_id`
-- `item_template_id`
-- `sequence_no`
-- `outcome` (pass, fail, not_applicable if allowed)
+### InspectionItemResult
+- `inspectionItemResultId`
+- `inspectionId`
+- `itemCode`
+- `itemText`
+- `sequence`
+- `outcome` (`Pass`, `Fail`, `NotApplicable?` confirm)
 - `description`
-- `requires_evidence`
-- `recorded_at_utc`
+- `requiresEvidence`
+- `capturedAt`
 
-### Evidence
-- `evidence_id`
-- `inspection_id` or `defect_id` or `release_id`
-- `blob_uri`
-- `blob_version_id`
-- `content_hash_sha256`
-- `captured_at_utc`
-- `uploaded_at_utc`
-- `mime_type`
-- `size_bytes`
-- `is_immutable_locked`
+### EvidenceAsset
+- `evidenceAssetId`
+- `inspectionId`
+- `defectId` nullable
+- `blobUri`
+- `contentHash`
+- `mimeType`
+- `capturedAt`
+- `uploadedAt`
+- `immutabilityPolicyRef`
 
 ### Defect
-- `defect_id`
-- `inspection_id`
-- `inspection_item_result_id`
-- `severity` (critical, major, minor)
-- `free_text_description`
-- `taxonomy_code_suggested`
-- `taxonomy_code_confirmed`
-- `classification_status`
-- `location_lat`
-- `location_lon`
+- `defectId`
+- `inspectionId`
+- `inspectionItemResultId`
+- `severity` (`Minor`, `Major`, `Critical`) confirm taxonomy
+- `description`
+- `location`
+- `status` (`Open`, `Grounding`, `InRepair`, `Resolved`, `Closed`)
+- `taxonomyCodeProposed`
+- `taxonomyCodeFinal`
+- `classificationReviewStatus`
 
-### Grounding event
-- `grounding_event_id`
-- `vehicle_id`
-- `inspection_id`
-- `trigger_defect_id`
-- `grounding_reason`
-- `grounding_status` (pending_external, applied_external, failed_external, released)
-- `internal_decision_at_utc`
-- `external_applied_at_utc`
-- `released_at_utc`
-- `idempotency_key`
-
-### Workshop job
-- `workshop_job_id`
-- `vehicle_id`
-- `source_defect_id`
+### GroundingEvent
+- `groundingEventId`
+- `vehicleId`
+- `inspectionId`
+- `triggerDefectId`
+- `groundingReason`
 - `status`
-- `created_at_utc`
-- `assigned_to`
-- `priority`
-- `opened_by`
+- `externalIdempotencyKey`
+- `requestedAt`
+- `appliedAt`
+- `resolvedAt`
+- `manualResolutionFlag`
 
-### Release to service
-- `release_id`
-- `vehicle_id`
-- `workshop_job_id`
-- `released_by_user_id`
-- `released_at_utc`
-- `competency_basis`
-- `release_notes`
-- `post_repair_check_passed`
-
-### Outbox
-- `outbox_message_id`
-- `aggregate_type`
-- `aggregate_id`
-- `event_type`
-- `payload_json`
+### WorkshopJob
+- `jobId`
+- `vehicleId`
+- `sourceDefectId`
+- `createdAt`
 - `status`
-- `attempt_count`
-- `next_attempt_at_utc`
-- `last_error`
+- `assignedTo`
+- `diagnosis`
+- `repairSummary`
+
+### RepairAction
+- `repairActionId`
+- `jobId`
+- `performedBy`
+- `performedAt`
+- `actionType`
+- `notes`
+
+### PartUsage
+- `partUsageId`
+- `jobId`
+- `partNumber`
+- `description`
+- `quantity`
+
+### ReleaseRecord
+- `releaseId`
+- `vehicleId`
+- `jobId`
+- `releasedBy`
+- `releasedAt`
+- `releaseDecision`
+- `releaseNotes`
+- `externalClearanceStatus`
+
+### NotificationAttempt
+- `notificationAttemptId`
+- `eventType`
+- `recipient`
+- `channel`
+- `attemptedAt`
+- `outcome`
+- `fallbackSequence`
+- `correlationId`
+
+### AuditEvent
+- `auditEventId`
+- `aggregateType`
+- `aggregateId`
+- `eventType`
+- `actorId`
+- `occurredAt`
+- `payloadHash`
+- `correlationId`
 
 ---
 
-## 6. Data lifecycle and immutability
+## 8. Data architecture and storage design
 
-## 6.1 Inspection evidence lifecycle
-1. Driver captures photo locally
-2. Photo stored in encrypted local app storage with metadata
-3. On sync/submit, client uploads via pre-authorized mechanism
-4. Server validates hash and associates evidence to inspection/defect
-5. Inspection submission transaction finalizes immutable record
-6. Blob object is placed under immutability/versioning policy
-7. SQL stores content hash, blob version, and audit references
+## 8.1 Azure SQL
+Use SQL for:
+- inspections
+- item results
+- defects
+- grounding events
+- workshop jobs
+- releases
+- notifications
+- audit metadata
+- sync journal
+- outbox/inbox tables
 
-## 6.2 Immutability controls
-- No update-in-place for submitted inspections
-- Append-only annotations/corrections
-- Blob versioning enabled
-- Retention/immutability policy for evidence and exports
-- Hash stored for tamper detection
-- Audit event on every read of sensitive evidence export if required by policy
+### Recommended patterns
+- rowversion/concurrency token where mutable records exist
+- append-only audit/event tables
+- partitioning or archival strategy for long retention
+- encrypted columns for sensitive fields where needed
+- strict foreign keys for evidence traceability
 
-## 6.3 Retention
-Based on intake, evidence retained for **7 years**.  
-Recommendation:
-- Formalize retention policy by artifact type:
-  - inspections
-  - evidence photos
-  - repair evidence
-  - notification logs
-  - AI review records
-  - exports
-- Confirm legal hold and deletion exceptions with compliance stakeholders
+## 8.2 Blob storage
+Use Blob for:
+- defect photos
+- post-repair evidence
+- exported compliance bundles if needed
+
+### Recommended controls
+- immutable blob policy after successful submission
+- content hash stored in SQL
+- malware scanning pipeline if available/approved
+- private containers only
+- time-limited upload SAS or backend-mediated upload
+- no public URLs
+
+## 8.3 Retention
+Based on supplied requirement:
+- roadworthiness evidence retained for **7 years**
+
+**Proposed retention policy**
+- SQL operational data retained online per performance needs
+- evidence and audit records retained 7 years minimum
+- archival/export strategy defined before production
 
 ---
 
-## 7. API contract recommendations
+## 9. API contract recommendations
 
-Below are reviewable contract proposals, not implemented APIs.
-
-## 7.1 External API style
+## 9.1 API style
 - REST over HTTPS
 - JSON payloads
-- OpenAPI-first
-- Versioned under `/api/v1`
-- Idempotency header for write operations
-- Correlation ID header on all requests
-- Managed identity for service-to-service
-- Entra bearer tokens for user-facing clients
+- versioned endpoints: `/api/v1/...`
+- idempotency support for submission and external side effects
+- correlation ID on every request
+- RFC7807-style problem details for errors
 
-### Standard headers
-- `Authorization: Bearer <token>`
-- `x-correlation-id`
-- `x-idempotency-key`
-- `x-client-captured-at`
-- `If-Match` for selected concurrency-sensitive updates where applicable
+## 9.2 Core internal API surface
 
----
+### Start inspection
+`POST /api/v1/inspections/start`
 
-## 7.2 Proposed core APIs
+Request:
+```json
+{
+  "vehicleId": "VH-1024",
+  "inspectionType": "PreTrip",
+  "driverId": "DRV-778",
+  "clientTimestamp": "2026-08-27T06:02:11Z"
+}
+```
+
+Response:
+```json
+{
+  "inspectionSessionId": "INS-SESSION-123",
+  "vehicle": {
+    "vehicleId": "VH-1024",
+    "vehicleType": "RigidTruck",
+    "regulatoryCategory": "HGV"
+  },
+  "odometer": {
+    "prefillValue": 182334,
+    "source": "Telematics",
+    "minimumAllowed": 182300
+  },
+  "checklistVersion": {
+    "checklistVersionId": "CHK-44",
+    "items": [
+      {
+        "itemCode": "BRAKES",
+        "sequence": 1,
+        "text": "Check brake operation"
+      }
+    ]
+  }
+}
+```
 
 ### Submit inspection
 `POST /api/v1/inspections`
 
-**Request**
+Headers:
+- `Idempotency-Key`
+- `X-Correlation-Id`
+
+Request:
 ```json
 {
-  "inspectionId": "uuid",
-  "inspectionType": "pre_trip",
-  "vehicleId": "VH-10234",
-  "driverId": "user-123",
-  "capturedAtUtc": "2026-08-27T05:58:12Z",
-  "captureMode": "offline",
+  "inspectionSessionId": "INS-SESSION-123",
+  "vehicleId": "VH-1024",
+  "driverId": "DRV-778",
+  "inspectionType": "PreTrip",
+  "captureStartedAt": "2026-08-27T06:02:11Z",
+  "submittedAtClient": "2026-08-27T06:08:41Z",
+  "capturedOffline": true,
   "odometer": {
-    "value": 182345,
-    "source": "manual",
-    "exceptionReason": null
+    "value": 182334,
+    "source": "DriverEntered",
+    "explanation": null
   },
-  "engineHours": {
-    "value": 5421.4,
-    "source": "telematics"
-  },
-  "checklistTemplateVersionId": "chk-van-uk-3",
   "items": [
     {
-      "itemTemplateId": "brakes-01",
-      "sequenceNo": 1,
-      "outcome": "pass",
-      "description": null,
-      "evidence": []
-    },
-    {
-      "itemTemplateId": "tyres-02",
-      "sequenceNo": 2,
-      "outcome": "fail",
-      "description": "Front left tyre has exposed cord visible.",
+      "itemCode": "BRAKES",
+      "outcome": "Fail",
+      "description": "Brake pedal feels soft and travel is excessive",
       "evidence": [
         {
-          "evidenceId": "ev-001",
-          "blobTokenRef": "upload-ref-123",
-          "contentHashSha256": "abc123..."
+          "uploadToken": "token-ref-1",
+          "contentHash": "sha256-abc"
         }
       ]
     }
@@ -549,554 +622,549 @@ Below are reviewable contract proposals, not implemented APIs.
 }
 ```
 
-**Response**
+Response:
 ```json
 {
-  "inspectionId": "uuid",
-  "status": "submitted",
-  "submittedAtUtc": "2026-08-27T06:03:01Z",
-  "groundingDecision": {
-    "status": "grounded",
-    "reason": "critical_defect",
-    "groundingEventId": "ge-123",
-    "externalFleetStatus": "pending_external_apply"
+  "inspectionId": "INS-90001",
+  "status": "Submitted",
+  "grounding": {
+    "required": true,
+    "status": "PendingExternalApply",
+    "driverInstruction": "DO NOT DRIVE THIS VEHICLE"
   },
   "defects": [
     {
-      "defectId": "df-001",
-      "severity": "critical",
-      "classificationStatus": "review_pending"
+      "defectId": "DEF-1001",
+      "severity": "Critical",
+      "classificationStatus": "PendingReview"
     }
-  ]
+  ],
+  "sync": {
+    "acceptedAt": "2026-08-27T06:09:02Z"
+  }
 }
 ```
 
-### Get inspection
-`GET /api/v1/inspections/{inspectionId}`
-
-### Create upload session for evidence
-`POST /api/v1/evidence/upload-sessions`
-
-### Confirm uploaded evidence
-`POST /api/v1/evidence/{evidenceId}/finalize`
-
-### Get vehicle grounding status
+### Get grounding status
 `GET /api/v1/vehicles/{vehicleId}/grounding-status`
 
-**Response**
+Response:
 ```json
 {
-  "vehicleId": "VH-10234",
-  "status": "grounded",
-  "effectiveAtUtc": "2026-08-27T06:03:01Z",
-  "source": "inspection_service",
-  "externalFleetStatus": "pending_external_apply",
-  "activeGroundingEventId": "ge-123",
-  "doNotDrive": true
+  "vehicleId": "VH-1024",
+  "status": "Grounded",
+  "sourceOfTruth": "InspectionPlatform",
+  "externalFleetStatus": "PendingConfirmation",
+  "activeGroundingEventId": "GRD-2001",
+  "message": "DO NOT DRIVE THIS VEHICLE"
 }
 ```
 
 ### Create workshop job from defect
 `POST /api/v1/workshop/jobs`
 
-### Record repair action
-`POST /api/v1/workshop/jobs/{jobId}/repairs`
-
-### Release vehicle to service
-`POST /api/v1/vehicles/{vehicleId}/release-to-service`
-
-**Request**
 ```json
 {
-  "workshopJobId": "wj-123",
-  "releasedByUserId": "user-789",
-  "competencyBasis": "workshop_controller_certified",
-  "releaseNotes": "Brake hose replaced and pressure tested.",
-  "postRepairCheckPassed": true,
+  "defectId": "DEF-1001",
+  "requestedBy": "system"
+}
+```
+
+### Record repair
+`POST /api/v1/workshop/jobs/{jobId}/repair-actions`
+
+### Release to service
+`POST /api/v1/vehicles/{vehicleId}/release`
+
+```json
+{
+  "jobId": "JOB-2001",
+  "releasedBy": "USR-900",
+  "releaseNotes": "Brake line replaced and tested",
   "evidence": [
     {
-      "evidenceId": "ev-900",
-      "blobTokenRef": "upload-ref-900",
-      "contentHashSha256": "def456..."
+      "uploadToken": "token-ref-2",
+      "contentHash": "sha256-def"
     }
   ]
 }
 ```
 
-### Notification status
-`GET /api/v1/notifications/{entityType}/{entityId}`
+### Sync pending offline submissions
+`POST /api/v1/sync/inspections/batch`
 
-### AI classification request
-Internal service-to-service:
-`POST /api/v1/defects/{defectId}/classification-requests`
-
-### AI review decision
-`POST /api/v1/defects/{defectId}/classification-review`
+Supports batch replay from mobile client.
 
 ---
 
-## 7.3 Integration contracts
+## 10. External integration contracts
 
-### Fleet management vehicle status API adapter contract
-Internal adapter request:
+## 10.1 Fleet management vehicle status API
+**Purpose:** apply/clear grounded status
+
+**Contract recommendations**
+- use idempotency key per grounding event
+- include vehicle ID, status, reason, timestamp, correlation ID
+- timeout at 3 seconds per supplied requirement
+- retry with exponential backoff and durable queue
+- store request/response metadata for audit
+
+**Example outbound payload**
 ```json
 {
-  "vehicleId": "VH-10234",
-  "targetStatus": "Grounded",
+  "vehicleId": "VH-1024",
+  "status": "Grounded",
   "reasonCode": "CRITICAL_DEFECT",
-  "groundingEventId": "ge-123",
-  "effectiveAtUtc": "2026-08-27T06:03:01Z",
-  "idempotencyKey": "grounding-ge-123"
+  "reasonReference": "GRD-2001",
+  "effectiveAt": "2026-08-27T06:09:02Z",
+  "correlationId": "c9f0..."
 }
 ```
 
-### Telematics ingestion contract
-```json
-{
-  "vehicleId": "VH-10234",
-  "observedAtUtc": "2026-08-27T05:55:00Z",
-  "odometer": 182340,
-  "engineHours": 5421.1,
-  "sourceMessageId": "tel-555"
-}
-```
+## 10.2 Telematics feed
+**Purpose:** odometer/engine-hour prefill and service planning
 
-### Notification dispatch contract
-```json
-{
-  "eventType": "vehicle_grounded",
-  "entityId": "ge-123",
-  "vehicleId": "VH-10234",
-  "recipients": [
-    {"role": "workshop_controller"},
-    {"role": "duty_manager"}
-  ],
-  "channelsInPriorityOrder": ["teams", "email", "sms_or_pager"],
-  "payload": {
-    "severity": "critical",
-    "location": {"lat": 51.5, "lon": -0.12},
-    "evidenceRefs": ["ev-001"]
-  }
-}
-```
+**Design recommendation**
+- maintain latest reading cache per vehicle
+- mark source and timestamp
+- if stale beyond tolerance, require driver entry and flag as manual
+- reconcile later if telematics recovers
+
+## 10.3 Notifications via Graph / Teams / Mail
+**Purpose:** workshop controller and duty manager alerts
+
+**Design recommendation**
+- notification policy table with escalation order
+- log every attempt
+- fallback channels
+- page duty manager if all fail within 5 minutes
+
+## 10.4 Foundry via APIM
+**Purpose:** defect taxonomy classification
+
+**Design recommendation**
+- APIM injects correlation headers
+- managed identity auth
+- content safety policy
+- per-user quotas
+- request/response logging with redaction
+- no direct client access
 
 ---
 
-## 8. Sequence flows
+## 11. Sequence flows
 
-## 8.1 Critical defect during offline inspection
-1. Driver opens cached checklist
-2. Driver records failed item with photo and description
-3. App determines local provisional severity only if taxonomy/rules are cached; otherwise marks for server evaluation
-4. On submit offline:
-   - inspection stored locally
-   - local “do not drive” banner shown if critical rule can be determined locally
-   - trip-start action blocked locally
-5. On reconnect:
-   - evidence uploads
-   - inspection syncs with original capture timestamp
-   - server persists inspection and defects transactionally
-   - server creates grounding event
-   - outbox emits:
-     - fleet grounding apply
-     - workshop notification
-     - duty manager alert if needed
-     - AI classification request if applicable
-6. If external grounding fails:
-   - internal status remains grounded
-   - driver still sees do-not-drive
-   - escalation triggered within 60 seconds target
+## 11.1 Critical defect submission flow
+1. Driver completes checklist and submits inspection
+2. Client sends inspection with idempotency key
+3. API validates payload and evidence references
+4. SQL transaction persists inspection, items, defects, grounding event, outbox messages
+5. API returns accepted response with do-not-drive instruction
+6. Worker processes grounding outbox event
+7. Grounding adapter calls fleet management API
+8. Notification workflow alerts workshop controller and duty manager
+9. Classification workflow sends defect text through APIM to Foundry
+10. Controller reviews proposed taxonomy
+11. Workshop job created and tracked
 
-## 8.2 Online critical defect
-1. Client submits inspection
-2. Server validates checklist, odometer, evidence completeness
-3. SQL transaction commits:
-   - inspection
-   - item results
-   - defect
-   - grounding event
-   - outbox messages
-4. Response returns grounded status immediately
-5. Async processors apply external grounding and notifications
-6. Monitoring tracks completion/failure
+## 11.2 Offline submission flow
+1. Driver completes inspection offline
+2. Client stores inspection package locally with capture timestamps
+3. Client displays queued state
+4. Connectivity returns
+5. Client uploads evidence and submits inspection batch
+6. Server deduplicates via idempotency key/client submission ID
+7. Server preserves original capture time and records sync receipt time
+8. Driver sees final accepted/grounded state
 
-## 8.3 Release to service
-1. Technician completes repair record
-2. Competent person reviews evidence/history
-3. Release request submitted
-4. SQL transaction commits release record and outbox event
+## 11.3 Release-to-service flow
+1. Technician completes repair
+2. Competent person reviews job and evidence
+3. Release record submitted
+4. SQL transaction records immutable release and outbox event
 5. Grounding adapter clears external grounded status
-6. Vehicle status projection updated to released when successful, or pending-clear with alert if external clear fails
+6. Vehicle status becomes releasable only after successful or tracked pending-clear state per approved business rule
+7. Audit trail finalized
 
 ---
 
-## 9. Security architecture and threat-model considerations
-
-## 9.1 Trust boundaries
-- Mobile/web client to API
-- API to SQL/Blob
-- API to fleet management system
-- API to telematics feed
-- API to Graph/Teams
-- API to APIM/Foundry
-- Human reviewer to AI-assisted classification workflow
-
-All boundaries should be treated as untrusted and validated.
-
----
-
-## 9.2 Key threats and mitigations
-
-### Threat: Unauthorized submission or attribution spoofing
-**Risk:** false inspections, repudiation  
-**Mitigations:**
-- Entra ID authentication
-- Named driver sign-in on shared devices
-- device compliance via Intune/conditional access
-- signed tokens validated server-side
-- audit of driver identity, device ID, app version, and capture timestamps
-
-### Threat: Tampering with inspection evidence
-**Risk:** invalid roadworthiness evidence  
-**Mitigations:**
-- append-only records
-- blob immutability/versioning
-- SHA-256 content hash
-- no direct client overwrite of submitted evidence
-- server-side evidence finalization only
-
-### Threat: Lost grounding due to integration failure
-**Risk:** unsafe vehicle remains driveable externally  
-**Mitigations:**
-- internal grounding decision committed transactionally
-- outbox + retries
-- idempotency keys
-- escalation within SLA
-- reconciliation dashboard
-
-### Threat: Duplicate sync causing duplicate defects/grounding
-**Risk:** inconsistent records and repeated notifications  
-**Mitigations:**
-- client-generated stable IDs
-- idempotency keys
-- unique constraints on inspection and grounding event identities
-- replay-safe handlers
-
-### Threat: Offline device compromise
-**Risk:** leakage or manipulation of queued inspections/photos  
-**Mitigations:**
-- encrypted local storage
-- minimal local retention
-- MDM/Intune controls
-- remote wipe where supported
-- app integrity checks
-- avoid storing long-lived secrets on device
-
-### Threat: Prompt injection or malicious free-text defect content
-**Risk:** AI workflow manipulation, unsafe classification  
-**Mitigations:**
-- treat defect text as untrusted
-- constrain prompts and tool access
-- no direct action from model output
-- human review mandatory
-- APIM content filtering and logging
-- model output schema validation
-
-### Threat: Excessive privilege in service-to-service integrations
-**Risk:** lateral movement or data overreach  
-**Mitigations:**
-- managed identity
-- least-privilege RBAC
-- separate identities per service
-- secretless auth where possible
-
-### Threat: Sensitive data exposure in logs
-**Risk:** privacy/compliance breach  
-**Mitigations:**
-- structured logging with redaction
-- no photo payloads in logs
-- no tokens or secrets in logs
-- role-based access to diagnostics
-
-### Threat: Export abuse
-**Risk:** bulk exfiltration of compliance evidence  
-**Mitigations:**
-- explicit export authorization
-- watermarking or audit logs
-- rate limits
-- scoped export jobs
-- time-limited download URLs
-
----
-
-## 9.3 Security requirements to formalize
-- RBAC matrix by role: driver, workshop technician, workshop controller, planner, compliance manager, duty manager, admin, support
-- Data classification for photos, location, driver identity, maintenance records
-- Encryption at rest and in transit
-- Audit retention and access policy
-- Incident response for failed grounding integration
-- Break-glass operational procedure
-
----
-
-## 10. AI/agent architecture recommendation
-
-## 10.1 Allowed AI use
-Use AI only for:
-- defect free-text classification suggestion
-- taxonomy candidate ranking
-- possibly summarization for controller review notes
-
-Do **not** allow AI to:
-- directly ground or release a vehicle
-- directly update system-of-record status without deterministic service logic
-- bypass human review for taxonomy application where severity matters
-
-## 10.2 Proposed agent workflow
-1. Inspection service sends defect text/evidence metadata to classification workflow
-2. Request passes through APIM
-3. Foundry/Microsoft Agent Framework returns structured suggestion:
-   - candidate taxonomy codes
-   - confidence
-   - rationale
-4. Result stored as `classification_suggested`
-5. Workshop controller reviews and confirms/overrides
-6. Confirmed taxonomy code becomes authoritative
-
-## 10.3 AI governance controls
-- APIM policy enforcement
-- correlation IDs
-- per-user or per-role quotas
-- schema-constrained outputs
-- prompt templates under source control
-- model/version logged with each invocation
-- fallback path if AI unavailable: manual classification queue
-
----
-
-## 11. Non-functional architecture mapping
+## 12. Non-functional design response
 
 ## Availability
-- App Service active-active
-- SQL failover group
-- retry/circuit breaker patterns
-- outbox for guaranteed eventual dispatch
-- no maintenance-window assumptions
+Requirement indicates active-active across two regions behind Front Door.
+
+**Recommendation**
+- deploy App Service in two regions
+- Front Door health probes and failover
+- SQL high availability configured appropriately
+- background workers deployed in paired regions with leader/lease control where needed
 
 ## Performance
-- inspection submit API target should be defined explicitly; recommend:
-  - p95 submit under 2 seconds excluding large evidence upload
-  - p95 grounding decision response under 1 second after payload validation
-- image upload should use chunking/resume where practical
+**Targets proposed from UX/requirements**
+- checklist load: < 2 seconds on warm path
+- inspection submit acknowledgment: < 3 seconds nominal online
+- grounding alert to duty manager: within 60 seconds on integration failure
+- workshop notification: within 5 minutes max
+- sync after reconnection: within 5 minutes under normal backlog
 
 ## Reliability
-- no lost submissions
-- no duplicate grounding
-- deterministic retries
-- dead-letter handling for failed integrations
+- outbox pattern for all side effects
+- idempotent submission
+- resumable evidence upload
+- retry with poison/dead-letter handling
+- reconciliation jobs for grounding and notification drift
 
-## Scalability
-- stateless API instances
-- background workers scale independently
-- SQL indexing on vehicle/time/status
-- blob offload for media
+## Security
+- Entra ID authentication
+- conditional access with Intune-compliant device
+- RBAC by role
+- managed identity for service-to-service
+- encryption in transit and at rest
+- immutable evidence
+- audit logging
+
+## Accessibility
+Derived from UX pack:
+- assertive announcement for grounding banner
+- no color-only severity communication
+- explicit labels for pass/fail
+- numeric keyboard hint for odometer
+- live region updates for notification status
 
 ## Auditability
-- immutable records
+- immutable inspections and releases
 - append-only audit events
-- export provenance
-- reviewer attribution for release and classification
-
-## Accessibility and field usability
-- large touch targets
-- one-item-per-screen inspection flow
-- assertive grounding banner
-- offline indicators
-- low-light/high-contrast support
+- correlation IDs across all services
+- evidence hash verification
+- actor attribution for every user action
 
 ---
 
-## 12. Observability and operational readiness
+## 13. Threat model considerations
 
-## 12.1 Telemetry standards
-Every request/event should carry:
-- `correlation_id`
-- `inspection_id`
-- `vehicle_id`
-- `driver_id` where permitted
-- `grounding_event_id`
-- `outbox_message_id`
-- `external_request_id`
+## 13.1 Assets
+- inspection evidence
+- grounding status
+- release-to-service decisions
+- driver identity attribution
+- defect photos
+- service compliance records
+- AI classification outputs and review decisions
 
-## 12.2 Key dashboards
-- inspection submissions by status
-- offline queue age and sync latency
-- grounding events pending external apply
-- notification failures by channel
-- workshop job creation latency
-- release-to-service pending external clear
-- AI classification queue and review turnaround
-- evidence upload/finalization failures
+## 13.2 Trust boundaries
+- mobile device to API
+- API to SQL/blob
+- API to external fleet management
+- API/worker to Graph/Teams
+- APIM to Foundry
+- offline local storage on handheld device
 
-## 12.3 Critical alerts
-- grounding apply pending beyond threshold
-- notification all-channels failed
-- sync backlog exceeds threshold
-- blob finalization/hash mismatch
-- SQL failover or elevated error rate
-- APIM/Foundry classification outage
-- repeated odometer anomaly spikes
+## 13.3 Key threats and mitigations
+
+### T1. Lost or duplicated offline submissions
+**Risk:** missing or duplicate inspections  
+**Mitigations:**
+- client-generated submission ID
+- idempotency keys
+- sync journal
+- server dedupe rules
+- immutable accepted records
+
+### T2. Tampering with evidence before upload
+**Risk:** altered roadworthiness evidence  
+**Mitigations:**
+- content hash on client and server
+- immutable blob after submission
+- timestamp preservation
+- signed upload flow
+- audit event on upload completion
+
+### T3. Unauthorized release to service
+**Risk:** unsafe vehicle returned to operation  
+**Mitigations:**
+- role-based authorization
+- step-up auth if required for release
+- release requires named competent person
+- immutable release record
+- dual-control option as future enhancement if policy requires
+
+### T4. Grounding integration failure
+**Risk:** vehicle appears drivable in external system  
+**Mitigations:**
+- local authoritative do-not-drive state
+- trip-start deny while unresolved
+- alert duty manager within 60 seconds
+- durable retries
+- reconciliation dashboard
+
+### T5. AI misclassification
+**Risk:** incorrect taxonomy/severity routing  
+**Mitigations:**
+- human review before final taxonomy application
+- confidence capture
+- no autonomous severity override without approved policy
+- APIM safety and logging
+
+### T6. Device compromise or shared-device misuse
+**Risk:** false attribution or data leakage  
+**Mitigations:**
+- Entra sign-in per driver
+- Intune compliance
+- local encrypted storage
+- session timeout
+- wipe on sign-out for shared-device local data where feasible
+
+### T7. Broken access control
+**Risk:** drivers viewing workshop-only or compliance data  
+**Mitigations:**
+- backend-enforced RBAC
+- route guards are not sufficient alone
+- row/record scoping where needed
+- audit access to sensitive records
+
+### T8. Sensitive data leakage in logs
+**Risk:** evidence or personal data exposed  
+**Mitigations:**
+- structured logging with redaction
+- no photo blobs in logs
+- APIM and app telemetry scrubbing
+- least-privilege access to monitoring
 
 ---
 
-## 13. Reviewable technical implementation plan
+## 14. Security and compliance recommendations
+
+- Use **managed identities** for all Azure service access
+- Store secrets only in **Key Vault** if any are unavoidable
+- Enforce **private endpoints** where feasible in later environments
+- Use **RBAC roles** such as:
+  - Driver
+  - Workshop Technician
+  - Workshop Controller
+  - Duty Manager
+  - Fleet Planner
+  - Compliance Manager
+  - System Administrator
+- Apply **blob immutability policy**
+- Enable **SQL auditing** and threat detection if available
+- Ensure **PII minimization** in model prompts and logs
+- Add **content safety** and prompt/response filtering in APIM path
+- Preserve **chain of custody** for evidence through hashes and audit events
+
+---
+
+## 15. Observability and operational design
+
+## Required telemetry
+- request latency and error rate
+- inspection submission success/failure
+- offline sync backlog
+- grounding event lifecycle
+- external fleet API failures
+- notification delivery attempts
+- classification workflow latency and review outcomes
+- evidence upload failures
+- release-to-service actions
+- reconciliation mismatches
+
+## Key dashboards
+1. **Safety dashboard**
+   - active grounded vehicles
+   - unresolved grounding failures
+   - vehicles blocked from trip start
+
+2. **Operations dashboard**
+   - defect-to-job elapsed time
+   - notification SLA compliance
+   - sync backlog by device/site
+
+3. **Compliance dashboard**
+   - inspection completeness
+   - evidence retention status
+   - service due-window compliance
+
+4. **AI governance dashboard**
+   - classification volume
+   - confidence distribution
+   - human override rate
+   - APIM quota/cost metrics
+
+## Alerting recommendations
+- grounding apply failure > 60 seconds
+- notification all-channel failure
+- sync backlog over threshold
+- evidence upload integrity mismatch
+- release attempted by unauthorized role
+- APIM/Foundry timeout spike
+
+---
+
+## 16. Implementable technical plan
 
 ## Phase 1 — Foundation
-- Establish solution structure for Angular/Ionic + FastAPI
-- Define OpenAPI contracts
-- Define SQL schema v1
-- Implement Entra auth integration
-- Implement correlation/idempotency middleware
-- Implement evidence upload/finalization pattern
-- Implement audit and outbox framework
+- establish repo structure and environments
+- define SQL schema baseline
+- define API contracts and OpenAPI
+- implement Entra auth and RBAC
+- configure Blob storage and evidence upload flow
+- configure APIM baseline for model traffic
+- set up App Insights / logging / correlation IDs
 
 ## Phase 2 — Guided inspection MVP
-- Vehicle selection/scan flow
-- Checklist retrieval and caching
-- Odometer capture and validation
-- One-item-at-a-time inspection UX
-- Mandatory fail evidence
-- Offline local queue
-- Submit/sync APIs
-- Immutable inspection persistence
+- vehicle selection and checklist retrieval
+- odometer validation
+- one-item-at-a-time inspection UI
+- fail evidence capture
+- immutable inspection submission
+- offline local queue and sync
+- audit event creation
 
-## Phase 3 — Grounding and notification
-- Defect creation and severity rules
-- Grounding event model
-- Internal trip-start gate API
-- Grounding adapter with retries/idempotency
-- Notification dispatcher with fallback channels
-- Operational dashboards and alerts
+## Phase 3 — Grounding and notifications
+- defect derivation and severity rules
+- grounding event model
+- grounding adapter with idempotent external calls
+- do-not-drive UX
+- workshop/duty manager notification orchestration
+- failure escalation and retry handling
 
 ## Phase 4 — Workshop and release
-- Workshop job creation
-- Defect/evidence/history view
-- Repair action and parts recording
-- Competent release workflow
-- External grounding clear integration
-- Post-repair evidence capture
+- workshop job creation and lifecycle
+- repair and parts recording
+- release-to-service authorization and workflow
+- external grounding clear integration
+- release audit and evidence
 
 ## Phase 5 — Service planning and compliance
-- Usage ingestion from telematics
-- Service due-window calculations
-- Planner/compliance views
-- Export generation and audit trail
+- telematics ingestion/cache
+- service-plan calculator
+- due-window notifications
+- compliance export package
+- reporting endpoints
 
 ## Phase 6 — AI-assisted classification
-- APIM-routed classification workflow
-- structured model output contract
-- controller review queue
-- provenance and governance logging
-- fallback manual path
+- APIM policies for model route
+- Foundry agent workflow integration
+- controller review UI
+- taxonomy application and audit trail
+- governance metrics
 
 ## Phase 7 — Hardening
 - failover testing
-- offline soak testing
-- security testing
-- reconciliation tooling
-- retention/immutability validation
-- performance tuning
+- offline chaos testing
+- reconciliation jobs
+- penetration/security review
+- retention and archival validation
+- performance and accessibility validation
 
 ---
 
-## 14. Suggested backlog for design-to-build handoff
+## 17. Suggested work breakdown by engineering stream
 
-### Architecture work items
-- Produce C4 context/container/component diagrams
-- Finalize ADR set
-- Define trust boundaries and data classification
-- Define RTO/RPO and failover runbook
-- Define reconciliation process for grounding mismatches
+## Front-end
+- shared app shell and role routing
+- driver inspection flow
+- offline storage/sync engine
+- grounding banner UX
+- workshop job UI
+- release UI
+- planner/compliance views
 
-### Data work items
-- Create logical and physical data model
-- Define immutability and retention policy
-- Define indexing and partitioning strategy
-- Define export schema for compliance evidence
+## Backend/API
+- inspection domain
+- defect/grounding domain
+- workshop domain
+- release domain
+- sync endpoints
+- audit/eventing
+- evidence token service
 
-### API work items
-- Publish OpenAPI specs
-- Define error model and status codes
-- Define idempotency semantics
-- Define sync protocol and evidence upload contract
+## Integration
+- fleet management adapter
+- telematics adapter
+- Graph/Teams/mail dispatcher
+- reconciliation jobs
 
-### Security work items
-- RBAC matrix
-- threat model workshop
-- conditional access and device compliance rules
-- logging/redaction standards
-- penetration/security test plan
+## Data
+- SQL schema
+- retention strategy
+- reporting views
+- export model
 
-### Delivery work items
-- CI/CD workflow design
-- environment configuration strategy
-- feature flags for AI and external integrations
-- test data and synthetic evidence strategy
+## AI/Platform
+- APIM route and policies
+- Foundry workflow
+- prompt contract
+- review-state persistence
+- governance telemetry
 
----
-
-## 15. Open issues and decisions needed
-
-1. **Trip-start gate authority**
-   - Which system is authoritative for blocking trip start: this solution, fleet management system, or both?
-2. **Offline criticality determination**
-   - Will severity rules be cached locally, or only determined server-side after sync?
-3. **Vehicle assignment rules**
-   - Is “vehicle not assigned to driver” a warning, approval step, or hard stop?
-4. **Release competency model**
-   - What qualifies a “competent person” and how is that represented in identity/roles?
-5. **Notification fallback**
-   - What exact fallback channels are approved beyond Teams/email?
-6. **Evidence retention lock**
-   - Is WORM/legal hold required, or is versioning + retention sufficient?
-7. **Location data**
-   - Is roadside location mandatory, optional, or consent-based?
-8. **Export format**
-   - PDF, CSV, JSON package, or all three?
-9. **Telematics reconciliation**
-   - What is the authoritative rule when manual odometer conflicts with delayed telematics?
-10. **Regional data residency**
-   - Any restrictions on cross-region replication for evidence or user data?
+## DevOps
+- GitHub Actions
+- IaC templates
+- environment protection
+- monitoring/alerts
+- active-active deployment automation
 
 ---
 
-## 16. Recommended next-step approvals
+## 18. Review gates and acceptance criteria for design approval
 
-Before implementation, I recommend human review and approval of:
+This architecture should be approved only after confirmation of:
 
-- Architecture decision records
-- Data model and immutability approach
-- API contracts and idempotency model
-- Threat model and security controls
-- AI human-review workflow
-- Operational reconciliation and escalation procedures
+1. **Grounding source of truth**
+   - Is local platform state sufficient to block trip start before external fleet status confirms?
+
+2. **Severity model**
+   - Is criticality determined by checklist item, taxonomy code, controller review, or a combination?
+
+3. **Release semantics**
+   - Can release be considered operationally complete before external clear confirmation, or must it remain blocked?
+
+4. **Offline evidence handling**
+   - Are photos uploaded only on reconnect, and what is the allowed local retention/security posture on shared devices?
+
+5. **Checklist governance**
+   - Who owns checklist versioning and regulatory mappings?
+
+6. **Trip-start integration**
+   - Which system enforces “no trip can be started against that vehicle”?
+
+7. **Data retention details**
+   - Is 7-year retention required for all audit metadata or only evidence/inspection records?
+
+8. **Controller review SLA**
+   - What happens operationally if AI classification review is delayed?
 
 ---
 
-## 17. Proposed review outcome
+## 19. Open questions
 
-**Recommendation:** **Proceed to detailed design** after stakeholder review, with special attention to:
-- grounding authority and reconciliation
-- offline sync semantics
-- evidence immutability controls
-- release-to-service authorization
-- AI review governance
+- Is `NotApplicable` a valid checklist outcome?
+- Are pre-trip and post-trip checklists versioned independently?
+- Is geolocation required for defect notification if device permissions are denied?
+- Are there legal requirements for timestamp source integrity beyond device time?
+- Must evidence export be PDF, ZIP, JSON bundle, or all three?
+- Are workshop jobs always one-to-one with defects, or can multiple defects roll into one job?
+- Is dual approval required for release of previously grounded vehicles?
+- What exact taxonomy standard is used for defect classification?
 
-If useful, I can next convert this into any of the following review artifacts:
+---
 
-1. **ADR document set**
-2. **C4 architecture diagrams in Mermaid**
-3. **OpenAPI draft**
-4. **SQL schema draft**
-5. **Threat model table using STRIDE**
-6. **Implementation work breakdown by sprint**
+## 20. Reviewable proposal summary
+
+**Recommendation:** Proceed with a design baseline centered on:
+
+- Angular/Ionic offline-first client
+- FastAPI transactional backend
+- Azure SQL + Blob immutable evidence
+- outbox-driven integration architecture
+- separate grounding adapter
+- APIM-governed Foundry workflow with human review
+- active-active Azure hosting and strong observability
+
+This design is consistent with the supplied constraints and is implementable, but it should be treated as **proposed pending human approval** because source documents are draft and partially truncated.
+
+If useful, I can next convert this into:
+1. a formal **ADR set**,  
+2. a **C4-style component breakdown**,  
+3. a **SQL schema draft**, or  
+4. an **OpenAPI contract starter**.
