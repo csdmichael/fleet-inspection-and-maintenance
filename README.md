@@ -136,7 +136,16 @@ these repository secrets and variables first:
 ## Published links
 
 <!-- agentic-sdlc:published-links:start -->
-_Populated automatically once the deployment pipeline succeeds._
+| Component | URL |
+| --- | --- |
+| UI | <https://fleet-inspection-and-maintenance-ui.azurewebsites.net> |
+| API | <https://fleet-inspection-and-maintenance-api.azurewebsites.net> |
+| Swagger UI | <https://fleet-inspection-and-maintenance-api.azurewebsites.net/docs> |
+| OpenAPI document | <https://fleet-inspection-and-maintenance-api.azurewebsites.net/openapi.json> |
+| Maintenance API | <https://fleet-inspection-and-maintenance-api.azurewebsites.net/api/maintenances> |
+| API health probe | <https://fleet-inspection-and-maintenance-api.azurewebsites.net/health> |
+
+_Published and verified 2026-08-27 05:38 UTC by the Agentic SDLC DevOps & Release Agent via `deploy-azure.yml`. Smoke tests covered the health probe, Swagger/OpenAPI, the UI, and a create/update/delete round trip._
 <!-- agentic-sdlc:published-links:end -->
 
 ## Requirements scope
